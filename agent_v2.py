@@ -1,0 +1,46 @@
+import os
+from openai import OpenAI
+from topic_memory import TopicMemory
+from dotenv import load_dotenv
+
+load_dotenv()
+
+client = OpenAI(
+    api_key=os.getenv("GROQ_API_KEY"),
+    base_url="https://api.groq.com/openai/v1"
+)
+
+def chat(session_id="default"):
+    memory = TopicMemory(session_id)
+    print(f"🧠 TopicMemory v0.2 | Session: {session_id}")
+    print("Commands: 'quit' | 'stats' | 'chunks'\n")
+
+    while True:
+        user_input = input("You: ").strip()
+
+        if user_input.lower() == 'quit':
+            break
+        if user_input.lower() == 'stats':
+            import json
+            print(json.dumps(memory.stats(), indent=2))
+            continue
+        if not user_input:
+            continue
+
+        memory.add_message("user", user_input)
+        context = memory.get_context(user_input)
+
+        response = client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=context if context else [
+                {"role": "user", "content": user_input}
+            ]
+        )
+
+        reply = response.choices[0].message.content
+        memory.add_message("assistant", reply)
+
+        print(f"Agent: {reply}\n")
+
+if __name__ == "__main__":
+    chat("soumik-v2")
