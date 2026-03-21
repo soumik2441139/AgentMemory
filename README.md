@@ -126,7 +126,4 @@ LangChain memory requires the entire LangChain framework. AgentMemory is a stand
 - [ ] pip package (v1.0)
 - [ ] Multi-language support (v1.0)
 
-## Built By
 
-Soumik — 3rd year CSE @ KIIT University
-Inspired by the real problem of AI agents losing context in long conversations.
