@@ -5,6 +5,7 @@ import re
 from nltk.corpus import stopwords
 from similarity import SimilarityMatcher
 from persistence import PersistenceLayer
+from summarizer import maybe_summarize
 
 STOPWORDS = set(stopwords.words('english'))
 matcher = SimilarityMatcher(threshold=0.15)
@@ -69,6 +70,9 @@ class AgentMemory:
         return [json.loads(c) for c in raw]
 
     def _save_chunk(self, chunk):
+        if chunk.get("type") == "topic":
+            chunk = maybe_summarize(chunk)
+        
         chunks = self._get_all_chunks()
         updated = False
         for i, c in enumerate(chunks):
