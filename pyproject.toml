@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=42", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agentmemory"
+version = "1.1.0"
+description = "Lightweight AI agent memory management using Redis"
+readme = "README.md"
+requires-python = ">=3.8"
+dependencies = [
+    "redis>=4.0.0",
+    "openai>=1.0.0",
+    "python-dotenv>=0.19.0",
+    "nltk>=3.7",
+    "scikit-learn>=1.0.0",
+]
