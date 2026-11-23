@@ -4,18 +4,34 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-client = OpenAI(
-    api_key=os.getenv("GROQ_API_KEY"),
-    base_url="https://api.groq.com/openai/v1"
-)
-
 SUMMARIZE_THRESHOLD = 6  # summarize chunk when it hits this many messages
+
+
+def _get_summarizer_client():
+    if os.getenv("OPENAI_API_KEY"):
+        return OpenAI(api_key=os.getenv("OPENAI_API_KEY")), os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+    elif os.getenv("GROQ_API_KEY"):
+        return OpenAI(
+            api_key=os.getenv("GROQ_API_KEY"),
+            base_url="https://api.groq.com/openai/v1"
+        ), os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+    elif os.getenv("DEEPSEEK_API_KEY"):
+        return OpenAI(
+            api_key=os.getenv("DEEPSEEK_API_KEY"),
+            base_url="https://api.deepseek.com"
+        ), "deepseek-chat"
+    return None, None
+
 
 def summarize_chunk(chunk):
     messages = chunk["messages"]
     
     if len(messages) < SUMMARIZE_THRESHOLD:
         return None  # not ready to summarize yet
+
+    client, model = _get_summarizer_client()
+    if not client:
+        return None
 
     # Build conversation text
     conversation = "\n".join([
@@ -32,14 +48,17 @@ CONVERSATION:
 
 SUMMARY:"""
 
-    response = client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
-        messages=[{"role": "user", "content": prompt}],
-        max_tokens=150
-    )
-
-    summary = response.choices[0].message.content.strip()
-    return summary
+    try:
+        response = client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=150
+        )
+        summary = response.choices[0].message.content.strip()
+        return summary
+    except Exception as e:
+        print(f"  Summarization skipped: {e}")
+        return None
 
 
 def maybe_summarize(chunk):
@@ -66,5 +85,5 @@ def maybe_summarize(chunk):
     ] + last_two
 
     chunk["summarized"] = True
-    print(f"  📝 Summarized chunk '{chunk['title']}' ({len(messages)} → {len(chunk['messages'])} messages)")
+    print(f"  Summarized chunk '{chunk['title']}' ({len(messages)} -> {len(chunk['messages'])} messages)")
     return chunk

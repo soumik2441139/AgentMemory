@@ -1,7 +1,15 @@
 venv/
+.venv/
 .env
 __pycache__/
 *.pyc
 *.pyo
 .DS_Store
+.idea/
 *.log
+
+# Generated artifacts
+*.db
+*.egg-info/
+dist/
+build/

@@ -1,21 +1,39 @@
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
-import numpy as np
 
 class SimilarityMatcher:
     def __init__(self, threshold=0.25):
         self.threshold = threshold
 
     def score(self, text1, text2):
-        if not text1.strip() or not text2.strip():
-            return 0.0
+        return self.scores(text1, [text2])[0]
+
+    def scores(self, query, documents):
+        """Return TF-IDF similarity scores for several documents in one fit."""
+        scores = [0.0] * len(documents)
+        if not query or not query.strip():
+            return scores
+
+        valid_documents = [
+            (index, document)
+            for index, document in enumerate(documents)
+            if document and document.strip()
+        ]
+        if not valid_documents:
+            return scores
+
         try:
-            vectorizer = TfidfVectorizer()
-            vectors = vectorizer.fit_transform([text1, text2])
-            score = cosine_similarity(vectors[0], vectors[1])[0][0]
-            return float(score)
-        except:
-            return 0.0
+            vectorizer = TfidfVectorizer(stop_words='english')
+            vectors = vectorizer.fit_transform(
+                [query] + [document for _, document in valid_documents]
+            )
+            similarities = cosine_similarity(vectors[0:1], vectors[1:])[0]
+            for (index, _), similarity in zip(valid_documents, similarities):
+                scores[index] = float(similarity)
+        except ValueError:
+            # Empty vocabularies (for example, stopwords only) have no match.
+            pass
+        return scores
 
     def find_best_match(self, new_text, chunks):
         best_chunk = None

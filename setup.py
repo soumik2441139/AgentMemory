@@ -19,6 +19,10 @@ setup(
         "nltk>=3.7",
         "scikit-learn>=1.0.0",
     ],
+    extras_require={
+        "api": ["fastapi>=0.100.0", "uvicorn>=0.22.0"],
+        "dev": ["pytest>=7.0.0"],
+    },
     python_requires=">=3.8",
     classifiers=[
         "Programming Language :: Python :: 3",

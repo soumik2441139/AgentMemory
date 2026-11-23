@@ -1,26 +1,62 @@
+import os
 import redis
 import json
 import time
 import re
-from nltk.corpus import stopwords
-from similarity import SimilarityMatcher
-from persistence import PersistenceLayer
-from summarizer import maybe_summarize
+from contextlib import nullcontext
+from dotenv import load_dotenv
 
-STOPWORDS = set(stopwords.words('english'))
-matcher = SimilarityMatcher(threshold=0.15)
+load_dotenv()
+
+try:
+    from nltk.corpus import stopwords
+    STOPWORDS = set(stopwords.words('english'))
+except Exception:
+    STOPWORDS = {
+        "i", "me", "my", "myself", "we", "our", "ours", "ourselves", "you", "your", "yours",
+        "yourself", "yourselves", "he", "him", "his", "himself", "she", "her", "hers",
+        "herself", "it", "its", "itself", "they", "them", "their", "theirs", "themselves",
+        "what", "which", "who", "whom", "this", "that", "these", "those", "am", "is", "are",
+        "was", "were", "be", "been", "being", "have", "has", "had", "having", "do", "does",
+        "did", "doing", "a", "an", "the", "and", "but", "if", "or", "because", "as", "until",
+        "while", "of", "at", "by", "for", "with", "about", "against", "between", "into",
+        "through", "during", "before", "after", "above", "below", "to", "from", "up", "down",
+        "in", "out", "on", "off", "over", "under", "again", "further", "then", "once", "here",
+        "there", "when", "where", "why", "how", "all", "any", "both", "each", "few", "more",
+        "most", "other", "some", "such", "no", "nor", "not", "only", "own", "same", "so",
+        "than", "too", "very", "s", "t", "can", "will", "just", "don", "should", "now"
+    }
+
+from .similarity import SimilarityMatcher
+from .persistence import PersistenceLayer
+from .summarizer import maybe_summarize
+
+matcher = SimilarityMatcher(threshold=0.12)
 MAX_CHUNK_SIZE = 8
 
 class AgentMemory:
-    def __init__(self, session_id, db_path="agentmemory.db"):
-        self.r = redis.Redis(host='localhost', port=6379, decode_responses=True)
+    def __init__(self, session_id, db_path=None, host=None, port=None, auto_summarize=False):
+        redis_host = host or os.getenv("REDIS_HOST", "localhost")
+        redis_port = int(port or os.getenv("REDIS_PORT", 6379))
+        resolved_db_path = db_path or os.getenv("AGENTMEMORY_DB_PATH", "agentmemory.db")
+        self.r = redis.Redis(host=redis_host, port=redis_port, decode_responses=True)
         self.session_id = session_id
         self.chunks_key = f"session:{session_id}:chunks_v1"
         self.chunk_counter_key = f"session:{session_id}:counter_v1"
-        self.db = PersistenceLayer(session_id, db_path)
+        self.last_chunk_key = f"session:{session_id}:last_chunk_v1"
+        self.lock_key = f"session:{session_id}:lock_v1"
+        self.auto_summarize = auto_summarize
+        self.db = PersistenceLayer(session_id, resolved_db_path)
 
         # On startup load from SQLite into Redis
-        self._restore_from_db()
+        with self._session_lock():
+            self._restore_from_db()
+
+    def _session_lock(self):
+        """Serialize mutations for a session across API workers."""
+        if not hasattr(self.r, "lock"):
+            return nullcontext()
+        return self.r.lock(self.lock_key, timeout=60, blocking_timeout=10)
 
     def _restore_from_db(self):
         # If Redis is empty but SQLite has data — restore it
@@ -32,19 +68,26 @@ class AgentMemory:
                 # Restore counter
                 max_id = max(c["id"] for c in chunks)
                 self.r.set(self.chunk_counter_key, max_id)
-                print(f"♻️ Restored {len(chunks)} chunks from SQLite")
+                print(f"Restored {len(chunks)} chunks from SQLite")
 
     def _extract_keywords(self, text):
         text = re.sub(r'[*#@_`\[\](){}\"\'<>]', ' ', text)
         words = text.lower().split()
-        keywords = [
-            w.strip(".,?!;:")
-            for w in words
-            if w.strip(".,?!;:") not in STOPWORDS
-            and len(w.strip(".,?!;:")) > 3
-            and w.strip(".,?!;:").isalpha()
-        ]
-        return list(set(keywords))[:10]
+        seen = set()
+        keywords = []
+        for w in words:
+            cleaned = w.strip(".,?!;:")
+            if (
+                cleaned not in STOPWORDS
+                and len(cleaned) > 3
+                and cleaned.isalpha()
+                and cleaned not in seen
+            ):
+                seen.add(cleaned)
+                keywords.append(cleaned)
+                if len(keywords) >= 10:
+                    break
+        return keywords
 
     def _is_small_talk(self, text, keywords):
         return len(text.split()) < 4 or len(keywords) == 0
@@ -70,7 +113,7 @@ class AgentMemory:
         return [json.loads(c) for c in raw]
 
     def _save_chunk(self, chunk):
-        if chunk.get("type") == "topic":
+        if getattr(self, "auto_summarize", False) and chunk.get("type") == "topic":
             chunk = maybe_summarize(chunk)
         
         chunks = self._get_all_chunks()
@@ -82,9 +125,18 @@ class AgentMemory:
                 break
         if not updated:
             chunks.append(chunk)
-        self.r.delete(self.chunks_key)
-        for c in chunks:
-            self.r.rpush(self.chunks_key, json.dumps(c))
+
+        serialized = [json.dumps(c) for c in chunks]
+        if hasattr(self.r, "pipeline"):
+            pipe = self.r.pipeline(transaction=True)
+            pipe.delete(self.chunks_key)
+            for item in serialized:
+                pipe.rpush(self.chunks_key, item)
+            pipe.execute()
+        else:
+            self.r.delete(self.chunks_key)
+            for item in serialized:
+                self.r.rpush(self.chunks_key, item)
         # Also persist to SQLite
         self.db.save_chunk(chunk)
 
@@ -102,6 +154,50 @@ class AgentMemory:
         return " ".join(user_msgs)
 
     def add_message(self, role, content):
+        with self._session_lock():
+            self._add_message(role, content)
+
+    def _set_last_chunk_id(self, chunk_id):
+        self._last_chunk_id = chunk_id
+        if hasattr(self, "last_chunk_key") and hasattr(self.r, "set"):
+            self.r.set(self.last_chunk_key, chunk_id)
+
+    def _get_last_chunk_id(self):
+        if hasattr(self, "last_chunk_key") and hasattr(self.r, "get"):
+            val = self.r.get(self.last_chunk_key)
+            if val is not None:
+                try:
+                    return int(val)
+                except (TypeError, ValueError):
+                    pass
+        return getattr(self, "_last_chunk_id", None)
+
+    def _add_message(self, role, content):
+        if role == "assistant":
+            chunks = self._get_all_chunks()
+            last_id = self._get_last_chunk_id()
+            target_chunk = None
+            if last_id is not None:
+                for c in chunks:
+                    if c["id"] == last_id:
+                        target_chunk = c
+                        break
+            if target_chunk is None and chunks:
+                target_chunk = max(chunks, key=lambda c: c.get("updated_at", 0))
+            if target_chunk is None:
+                target_chunk = self._find_or_create_general()
+
+            target_name = target_chunk.get("title", "General Chat")
+            target_chunk["messages"].append({
+                "role": role,
+                "content": content,
+                "timestamp": time.time()
+            })
+            target_chunk["updated_at"] = time.time()
+            self._save_chunk(target_chunk)
+            print(f"  Assistant -> '{target_name}'")
+            return
+
         keywords = self._extract_keywords(content)
 
         if self._is_small_talk(content, keywords):
@@ -113,28 +209,13 @@ class AgentMemory:
             })
             general["updated_at"] = time.time()
             self._save_chunk(general)
-            print(f"  💬 General chat")
-            return
-
-        if role == "assistant":
-            chunks = self._get_all_chunks()
-            topic_chunks = [c for c in chunks if c.get("type") == "topic"]
-            if topic_chunks:
-                latest = max(topic_chunks, key=lambda c: c["updated_at"])
-                latest["messages"].append({
-                    "role": role,
-                    "content": content,
-                    "timestamp": time.time()
-                })
-                latest["updated_at"] = time.time()
-                self._save_chunk(latest)
-                print(f"  🤖 Assistant → '{latest['title']}'")
+            self._set_last_chunk_id(general["id"])
+            print("  General chat")
             return
 
         chunks = self._get_all_chunks()
-        best_chunk = None
-        best_score = 0
-
+        candidates = []
+        candidate_texts = []
         for chunk in chunks:
             if chunk.get("type") == "general":
                 continue
@@ -143,8 +224,13 @@ class AgentMemory:
             chunk_text = self._get_user_only_text(chunk)
             if not chunk_text.strip():
                 continue
-            score = matcher.score(content, chunk_text)
-            if score > 0.15 and score > best_score:
+            candidates.append(chunk)
+            candidate_texts.append(chunk_text)
+
+        best_chunk = None
+        best_score = 0
+        for chunk, score in zip(candidates, matcher.scores(content, candidate_texts)):
+            if score > matcher.threshold and score > best_score:
                 best_score = score
                 best_chunk = chunk
 
@@ -154,12 +240,15 @@ class AgentMemory:
                 "content": content,
                 "timestamp": time.time()
             })
-            best_chunk["keywords"] = list(
-                set(best_chunk["keywords"] + keywords)
-            )[:15]
+            merged_keywords = list(best_chunk["keywords"])
+            for kw in keywords:
+                if kw not in merged_keywords:
+                    merged_keywords.append(kw)
+            best_chunk["keywords"] = merged_keywords[:15]
             best_chunk["updated_at"] = time.time()
             self._save_chunk(best_chunk)
-            print(f"  📌 Updated: '{best_chunk['title']}' (similarity: {best_score:.3f})")
+            self._set_last_chunk_id(best_chunk["id"])
+            print(f"  Updated: '{best_chunk['title']}' (similarity: {best_score:.3f})")
         else:
             counter = self.r.incr(self.chunk_counter_key)
             title = self._generate_title(keywords)
@@ -177,7 +266,8 @@ class AgentMemory:
                 "updated_at": time.time()
             }
             self._save_chunk(new_chunk)
-            print(f"  🆕 New topic: '{title}'")
+            self._set_last_chunk_id(new_chunk["id"])
+            print(f"  New topic: '{title}'")
 
     def get_context(self, current_message):
         chunks = self._get_all_chunks()
@@ -191,20 +281,29 @@ class AgentMemory:
                         "content": msg["content"]
                     })
 
-        scored = []
+        candidates = []
+        candidate_texts = []
         for chunk in chunks:
             if chunk.get("type") == "general":
                 continue
             chunk_text = self._get_user_only_text(chunk)
             if not chunk_text.strip():
                 continue
-            score = matcher.score(current_message, chunk_text)
-            if score > 0.1:
+            candidates.append(chunk)
+            candidate_texts.append(chunk_text)
+
+        scored = []
+        for chunk, score in zip(candidates, matcher.scores(current_message, candidate_texts)):
+            if score > 0.05:
                 scored.append((score, chunk))
 
         scored.sort(key=lambda x: x[0], reverse=True)
         for score, chunk in scored[:2]:
-            for msg in chunk["messages"][-4:]:
+            msgs = chunk["messages"]
+            selected = msgs[-4:]
+            if len(msgs) > 4 and msgs[0].get("summarized"):
+                selected = [msgs[0]] + selected
+            for msg in selected:
                 context.append({
                     "role": msg["role"],
                     "content": msg["content"]
@@ -213,10 +312,14 @@ class AgentMemory:
         return context
 
     def clear(self):
-        self.r.delete(self.chunks_key)
-        self.r.delete(self.chunk_counter_key)
-        self.db.delete_session(self.session_id)
-        print("🗑️ Memory cleared from Redis and SQLite!")
+        with self._session_lock():
+            self.r.delete(self.chunks_key)
+            self.r.delete(self.chunk_counter_key)
+            if hasattr(self, "last_chunk_key"):
+                self.r.delete(self.last_chunk_key)
+            self._last_chunk_id = None
+            self.db.delete_session(self.session_id)
+        print("Memory cleared from Redis and SQLite.")
 
     def stats(self):
         chunks = self._get_all_chunks()

@@ -1,10 +1,31 @@
 import unittest
+from unittest.mock import patch, MagicMock
 import time
-from memory_v1 import AgentMemory as BasicMemory
-from similarity import SimilarityMatcher
-from persistence import PersistenceLayer
-from summarizer import maybe_summarize
+import os
+import sys
+import tempfile
 
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
+import redis
+from agentmemory import BasicMemory, SimilarityMatcher, PersistenceLayer, maybe_summarize
+
+def is_redis_available():
+    try:
+        r = redis.Redis(
+            host=os.getenv("REDIS_HOST", "127.0.0.1"),
+            port=int(os.getenv("REDIS_PORT", 6379)),
+            socket_connect_timeout=0.2,
+            socket_timeout=0.2
+        )
+        return r.ping()
+    except Exception:
+        return False
+
+REDIS_AVAILABLE = is_redis_available()
+
+
+@unittest.skipUnless(REDIS_AVAILABLE, "Redis server not available")
 class TestBasicMemory(unittest.TestCase):
 
     def setUp(self):
@@ -57,6 +78,13 @@ class TestSimilarity(unittest.TestCase):
         score = self.matcher.score("", "some text")
         self.assertEqual(score, 0.0)
 
+    def test_scores_matches_individual_scoring(self):
+        documents = ["Redis caching and replication", "weather forecast today", ""]
+        scores = self.matcher.scores("How does Redis replication work?", documents)
+        self.assertEqual(len(scores), len(documents))
+        self.assertGreater(scores[0], 0.1)
+        self.assertEqual(scores[2], 0.0)
+
     def test_find_best_match(self):
         chunks = [
             {
@@ -84,8 +112,14 @@ class TestSimilarity(unittest.TestCase):
 class TestPersistence(unittest.TestCase):
 
     def setUp(self):
-        self.db = PersistenceLayer("test-persist", db_path="test.db")
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.db = PersistenceLayer(
+            "test-persist", db_path=os.path.join(self.temp_dir.name, "test.db")
+        )
         self.db.delete_session("test-persist")
+
+    def tearDown(self):
+        self.temp_dir.cleanup()
 
     def test_save_and_load(self):
         chunk = {
@@ -144,7 +178,14 @@ class TestSummarizer(unittest.TestCase):
         result = maybe_summarize(chunk)
         self.assertEqual(len(result["messages"]), 1)
 
-    def test_summarize_large_chunk(self):
+    @patch("agentmemory.summarizer._get_summarizer_client")
+    def test_summarize_large_chunk(self, mock_get_client):
+        mock_client = MagicMock()
+        mock_response = MagicMock()
+        mock_response.choices = [MagicMock(message=MagicMock(content="Concise summary of python discussion."))]
+        mock_client.chat.completions.create.return_value = mock_response
+        mock_get_client.return_value = (mock_client, "gpt-4o-mini")
+
         chunk = {
             "id": 1, "title": "Python", "type": "topic",
             "summarized": False,
@@ -156,6 +197,7 @@ class TestSummarizer(unittest.TestCase):
         result = maybe_summarize(chunk)
         self.assertLess(len(result["messages"]), 7)
         self.assertEqual(result["messages"][0]["role"], "system")
+        self.assertIn("Concise summary", result["messages"][0]["content"])
 
 
 if __name__ == "__main__":
