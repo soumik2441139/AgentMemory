@@ -1,8 +1,8 @@
 import os
-import redis
 import json
 import time
 from dotenv import load_dotenv
+from .memory import connect_redis_or_fallback
 
 load_dotenv()
 
@@ -10,7 +10,7 @@ class AgentMemory:
     def __init__(self, session_id, hot_limit=20, host=None, port=None):
         redis_host = host or os.getenv("REDIS_HOST", "localhost")
         redis_port = int(port or os.getenv("REDIS_PORT", 6379))
-        self.r = redis.Redis(host=redis_host, port=redis_port, decode_responses=True)
+        self.r = connect_redis_or_fallback(redis_host, redis_port)
         self.session_id = session_id
         self.hot_limit = hot_limit
         self.hot_key = f"session:{session_id}:hot"

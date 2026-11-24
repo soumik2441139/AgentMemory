@@ -4,6 +4,7 @@ import json
 import time
 import re
 from contextlib import nullcontext
+from threading import RLock
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -41,12 +42,101 @@ MAX_CHUNK_SIZE = 8
 # while dropping many accidental three-character overlaps.
 RETRIEVAL_THRESHOLD = 0.15
 
+
+class InMemoryRedisFallback:
+    """Process-local Redis-compatible store used when no Redis server is reachable."""
+
+    def __init__(self):
+        self.data = {}
+        self.lists = {}
+        self.counters = {}
+        self._lock = RLock()
+
+    def ping(self):
+        return True
+
+    def llen(self, key):
+        with self._lock:
+            return len(self.lists.get(key, []))
+
+    def lrange(self, key, start, end):
+        with self._lock:
+            items = list(self.lists.get(key, []))
+            if end == -1:
+                return items[start:]
+            return items[start:end + 1]
+
+    def rpush(self, key, val):
+        with self._lock:
+            bucket = self.lists.setdefault(key, [])
+            bucket.append(val)
+            return len(bucket)
+
+    def lpop(self, key):
+        with self._lock:
+            bucket = self.lists.get(key, [])
+            return bucket.pop(0) if bucket else None
+
+    def delete(self, *keys):
+        with self._lock:
+            for key in keys:
+                self.lists.pop(key, None)
+                self.data.pop(key, None)
+                self.counters.pop(key, None)
+
+    def incr(self, key):
+        with self._lock:
+            val = int(self.data.get(key, self.counters.get(key, 0))) + 1
+            self.counters[key] = val
+            self.data[key] = str(val)
+            return val
+
+    def set(self, key, val):
+        with self._lock:
+            self.data[key] = str(val)
+            try:
+                self.counters[key] = int(val)
+            except (TypeError, ValueError):
+                pass
+
+    def get(self, key):
+        with self._lock:
+            return self.data.get(key)
+
+
+_FALLBACK_STORE = InMemoryRedisFallback()
+_UNREACHABLE_REDIS_ENDPOINTS = set()
+
+
+def connect_redis_or_fallback(host, port):
+    """Connect to Redis with a short probe timeout, falling back to in-memory storage."""
+    endpoint = (host, int(port))
+    if endpoint in _UNREACHABLE_REDIS_ENDPOINTS:
+        return _FALLBACK_STORE
+    probe_hosts = ["127.0.0.1"] if host in ("localhost", "::1") else [host]
+    for probe_host in probe_hosts:
+        try:
+            client = redis.Redis(
+                host=probe_host,
+                port=port,
+                decode_responses=True,
+                socket_connect_timeout=0.15,
+                socket_timeout=0.25,
+            )
+            client.ping()
+            return client
+        except Exception:
+            pass
+    _UNREACHABLE_REDIS_ENDPOINTS.add(endpoint)
+    return _FALLBACK_STORE
+
+
 class AgentMemory:
     def __init__(self, session_id, db_path=None, host=None, port=None, auto_summarize=False):
         redis_host = host or os.getenv("REDIS_HOST", "localhost")
         redis_port = int(port or os.getenv("REDIS_PORT", 6379))
         resolved_db_path = db_path or os.getenv("AGENTMEMORY_DB_PATH", "agentmemory.db")
-        self.r = redis.Redis(host=redis_host, port=redis_port, decode_responses=True)
+        self.r = connect_redis_or_fallback(redis_host, redis_port)
         self.session_id = session_id
         self.chunks_key = f"session:{session_id}:chunks_v1"
         self.chunk_counter_key = f"session:{session_id}:counter_v1"

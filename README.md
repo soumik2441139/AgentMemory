@@ -79,7 +79,9 @@ pip install -e .
 python3 -c "import nltk; nltk.download('stopwords')"
 ```
 
-### 2. Set up Redis
+### 2. Set up Redis (Optional — Automatic In-Memory + SQLite Fallback)
+
+If a Redis server is running, AgentMemory uses it for active multi-worker session state. If Redis is not installed or not running, AgentMemory **automatically falls back to an in-memory store backed by SQLite** (`agentmemory.db`) so it works out of the box with zero setup.
 
 ```bash
 # Linux
@@ -92,7 +94,7 @@ brew services start redis
 Start-Process "C:\Program Files\Redis\redis-server.exe"
 ```
 
-Verify: `redis-cli ping` → `PONG`
+Verify (if using Redis): `redis-cli ping` → `PONG`
 
 ### 3. Configure
 
@@ -179,8 +181,8 @@ Memory is stored in **chunks** — each chunk is a topic container:
 
 ### Dual Storage
 
-- **Redis** — fast in-memory access during conversations
-- **SQLite** — persistent backup; on startup, if Redis is empty, chunks restore from SQLite automatically
+- **Redis (with automatic in-memory fallback)** — fast in-memory access during conversations; if no Redis server is reachable, falls back transparently to a thread-safe in-memory store
+- **SQLite** — persistent backup; on startup, if the active store is empty, chunks restore from SQLite automatically
 
 ## Benchmarks & Evaluation
 

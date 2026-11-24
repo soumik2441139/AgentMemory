@@ -8,24 +8,9 @@ import tempfile
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 import redis
-from agentmemory import BasicMemory, SimilarityMatcher, PersistenceLayer, maybe_summarize
-
-def is_redis_available():
-    try:
-        r = redis.Redis(
-            host=os.getenv("REDIS_HOST", "127.0.0.1"),
-            port=int(os.getenv("REDIS_PORT", 6379)),
-            socket_connect_timeout=0.2,
-            socket_timeout=0.2
-        )
-        return r.ping()
-    except Exception:
-        return False
-
-REDIS_AVAILABLE = is_redis_available()
+from agentmemory import AgentMemory, BasicMemory, SimilarityMatcher, PersistenceLayer, maybe_summarize
 
 
-@unittest.skipUnless(REDIS_AVAILABLE, "Redis server not available")
 class TestBasicMemory(unittest.TestCase):
 
     def setUp(self):
@@ -225,6 +210,30 @@ class TestSummarizer(unittest.TestCase):
         self.assertLess(len(result["messages"]), 7)
         self.assertEqual(result["messages"][0]["role"], "system")
         self.assertIn("Concise summary", result["messages"][0]["content"])
+
+
+class TestRedisOptionalFallback(unittest.TestCase):
+
+    def test_agentmemory_works_EndToEnd_without_redis_server(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "fallback.db")
+            # Port 1 is guaranteed unreachable so the in-memory fallback engages.
+            memory = AgentMemory("session-fallback", db_path=db_path, host="127.0.0.1", port=1)
+            memory.clear()
+
+            memory.add_message("user", "Tell me about Redis pub/sub")
+            memory.add_message("assistant", "Redis pub/sub is a messaging pattern...")
+
+            context = memory.get_context("How does Redis pub/sub handle failures?")
+            self.assertTrue(any("Redis pub/sub" in m["content"] for m in context))
+
+            stats = memory.stats()
+            self.assertEqual(stats["session"], "session-fallback")
+            self.assertGreaterEqual(stats["total_chunks"], 1)
+            self.assertEqual(stats["total_messages"], 2)
+
+            memory.clear()
+            self.assertEqual(memory.stats()["total_chunks"], 0)
 
 
 if __name__ == "__main__":
