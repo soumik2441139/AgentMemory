@@ -41,6 +41,7 @@ def summarize_chunk(chunk):
 
     prompt = f"""Summarize this conversation in 2-3 sentences. 
 Be concise. Capture the key topics and conclusions only.
+Preserve exact names, numbers, ports, tools, and concrete facts mentioned by the user.
 Do not add any extra commentary.
 
 CONVERSATION:

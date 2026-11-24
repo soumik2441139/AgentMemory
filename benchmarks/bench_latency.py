@@ -89,7 +89,7 @@ def run_benchmarks():
     ]
 
     print("=" * 65)
-    print("⚡ AGENTMEMORY RETRIEVAL LATENCY BENCHMARKS")
+    print("⚡ AGENTMEMORY WARM RETRIEVAL LATENCY BENCHMARKS")
     print("=" * 65)
     print(f"{'Chunks Stored':<15} | {'p50 Latency':<14} | {'p95 Latency':<14} | {'Max Latency'}")
     print("-" * 65)
@@ -97,6 +97,10 @@ def run_benchmarks():
     for n in scales:
         mem = setup_memory_with_chunks(n)
         timings = []
+
+        # Build the index once; the following reads show the repeated-read
+        # case where the retrieval cache can actually be reused.
+        mem.get_context(queries[0])
 
         # Run 5 query retrievals to measure distribution
         for _ in range(5):
@@ -115,5 +119,36 @@ def run_benchmarks():
     print("=" * 65)
 
 
+def run_alternating_chat_benchmark():
+    """Measure the normal write -> read -> assistant-write chat path.
+
+    Each user write changes a topic chunk, so it intentionally invalidates the
+    retrieval index.  This is reported separately from the warm-read result.
+    """
+    scales = [10, 100, 1000]
+    print("⚡ AGENTMEMORY ALTERNATING CHAT LATENCY BENCHMARKS")
+    print(f"{'Chunks Stored':<15} | {'p50 Turn':<14} | {'p95 Turn':<14} | {'Max Turn'}")
+    print("-" * 65)
+
+    for n in scales:
+        mem = setup_memory_with_chunks(n)
+        timings = []
+        for index in range(10):
+            message = f"How do I configure Redis cluster replication for node {index}?"
+            t0 = time.perf_counter()
+            mem.add_message("user", message)
+            mem.get_context(message)
+            mem.add_message("assistant", "Redis replication configuration noted.")
+            timings.append((time.perf_counter() - t0) * 1000)
+
+        p50 = statistics.median(timings)
+        p95 = statistics.quantiles(timings, n=10)[8]
+        max_lat = max(timings)
+        print(f"{n:<15} | {p50:>7.2f} ms     | {p95:>7.2f} ms     | {max_lat:>7.2f} ms", flush=True)
+
+    print("=" * 65)
+
+
 if __name__ == "__main__":
     run_benchmarks()
+    run_alternating_chat_benchmark()

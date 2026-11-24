@@ -3,12 +3,17 @@ Evaluation runner comparing context retrieval strategies on long multi-turn conv
 Measures Recall Accuracy, Estimated Tokens Used, and Number of Context Messages.
 """
 
-from generate_conversations import SCENARIOS, build_conversation
+from generate_conversations import (
+    LONG_NO_MATCH_CASES,
+    NO_MATCH_CASES,
+    SCENARIOS,
+    build_conversation,
+)
 from strategies import (
     LastNStrategy,
     KeywordChunkStrategy,
     TFIDFChunkStrategy,
-    DenseEmbeddingStrategy
+    SubwordNGramStrategy,
 )
 
 def estimate_tokens(messages):
@@ -28,12 +33,40 @@ def run_benchmark():
         "Last-20 Messages": LastNStrategy(20),
         "Keyword Chunking": KeywordChunkStrategy(chunk_size=6),
         "AgentMemory TF-IDF": TFIDFChunkStrategy(),
-        "Char N-Gram TF-IDF": DenseEmbeddingStrategy(),
+        "Char N-Gram TF-IDF": SubwordNGramStrategy(),
     }
 
     results = {name: {"hits": 0, "total": 0, "tokens": 0, "messages": 0} for name in strategies}
 
     print("=" * 72)
+
+    precision_strategy = TFIDFChunkStrategy()
+    precision_hits = 0
+    print("\nNo-match precision checks (AgentMemory TF-IDF)")
+    for case in NO_MATCH_CASES:
+        retrieved = precision_strategy.retrieve(case["messages"], case["query"])
+        passed = not retrieved
+        precision_hits += passed
+        status = "✅ NO CONTEXT" if passed else "❌ UNRELATED CONTEXT"
+        print(f"  {status} | {case['id']:<22} | msgs: {len(retrieved)}")
+    precision = (precision_hits / len(NO_MATCH_CASES)) * 100
+    print(f"No-match precision (short): {precision:.1f}% ({precision_hits}/{len(NO_MATCH_CASES)})")
+
+    print("\nNo-match precision checks in long conversations (AgentMemory TF-IDF)")
+    scenarios_by_id = {s["id"]: s for s in SCENARIOS}
+    long_hits = 0
+    for case in LONG_NO_MATCH_CASES:
+        convo = build_conversation(scenarios_by_id[case["scenario_id"]], padding_multiplier=3)
+        # The opening greeting lands in General Chat, which is always included.
+        allowed = {m["content"] for m in convo[:2]}
+        retrieved = precision_strategy.retrieve(convo, case["query"])
+        leaked = [m for m in retrieved if m["content"] not in allowed]
+        passed = not leaked
+        long_hits += passed
+        status = "✅ NO TOPIC CONTEXT" if passed else "❌ UNRELATED CONTEXT"
+        print(f"  {status} | {case['scenario_id']:<22} | topic msgs: {len(leaked)}")
+    long_precision = (long_hits / len(LONG_NO_MATCH_CASES)) * 100
+    print(f"No-match precision (long): {long_precision:.1f}% ({long_hits}/{len(LONG_NO_MATCH_CASES)})")
     print("🧠 AGENTMEMORY EVALUATION HARNESS — BENCHMARK RESULTS")
     print("=" * 72)
 

@@ -94,10 +94,10 @@ class TFIDFChunkStrategy:
         return mem.get_context(query)
 
 
-class DenseEmbeddingStrategy:
+class SubwordNGramStrategy:
     """
-    Embedding baseline: character/word n-gram TF-IDF subword dense vectorizer
-    simulating dense semantic retrieval without requiring 500MB PyTorch install.
+    Subword baseline: character n-gram TF-IDF (`char_wb` 1-3)
+    matching morphological variants without external embedding dependencies.
     """
     def __init__(self):
         self.vectorizer = TfidfVectorizer(ngram_range=(1, 3), analyzer="char_wb")
@@ -115,15 +115,24 @@ class DenseEmbeddingStrategy:
             mem.add_message(msg["role"], msg["content"])
 
         chunks = mem._get_all_chunks()
-        scored = []
+        candidates = []
+        candidate_texts = []
         for chunk in chunks:
+            if chunk.get("type") == "general":
+                continue
             user_text = mem._get_user_only_text(chunk)
             if not user_text.strip():
                 continue
-            vectors = self.vectorizer.fit_transform([query, user_text])
-            score = cosine_similarity(vectors[0], vectors[1])[0][0]
-            if score > 0.05:
-                scored.append((score, chunk))
+            candidates.append(chunk)
+            candidate_texts.append(user_text)
+
+        scored = []
+        if candidate_texts:
+            vectors = self.vectorizer.fit_transform([query] + candidate_texts)
+            similarities = cosine_similarity(vectors[0:1], vectors[1:])[0]
+            for chunk, score in zip(candidates, similarities):
+                if score > 0.05:
+                    scored.append((float(score), chunk))
 
         scored.sort(key=lambda x: x[0], reverse=True)
         context = []

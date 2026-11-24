@@ -85,6 +85,33 @@ class TestSimilarity(unittest.TestCase):
         self.assertGreater(scores[0], 0.1)
         self.assertEqual(scores[2], 0.0)
 
+    def test_subword_tfidf_matches_related_word_forms(self):
+        # Use the production retrieval configuration from agentmemory.memory.
+        from agentmemory.memory import retrieval_matcher
+        matcher = SimilarityMatcher(**retrieval_matcher.vectorizer_options)
+        score = matcher.score(
+            "What is my dog's name and favorite treat?",
+            "My golden retriever is named Barnaby and he loves peanut butter.",
+        )
+        self.assertGreater(score, 0.0)
+
+    def test_cached_scores_reuse_index_until_documents_change(self):
+        documents = ["Redis caching and replication", "weather forecast today"]
+        first = self.matcher.cached_scores("session-1", "How does Redis replication work?", documents)
+        cached_index = self.matcher._indexes["session-1"]
+        second = self.matcher.cached_scores("session-1", "How does Redis caching work?", documents)
+
+        self.assertGreater(first[0], 0.1)
+        self.assertGreater(second[0], 0.1)
+        self.assertIs(self.matcher._indexes["session-1"], cached_index)
+
+        self.matcher.cached_scores(
+            "session-1",
+            "How does Redis replication work?",
+            documents + ["Python typing annotations"],
+        )
+        self.assertIsNot(self.matcher._indexes["session-1"], cached_index)
+
     def test_find_best_match(self):
         chunks = [
             {

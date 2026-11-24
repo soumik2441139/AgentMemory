@@ -32,7 +32,14 @@ from .persistence import PersistenceLayer
 from .summarizer import maybe_summarize
 
 matcher = SimilarityMatcher(threshold=0.12)
+retrieval_matcher = SimilarityMatcher(
+    analyzer="char_wb",
+    ngram_range=(4, 5),
+)
 MAX_CHUNK_SIZE = 8
+# Four-character n-grams retain useful variants such as ``name`` / ``named``
+# while dropping many accidental three-character overlaps.
+RETRIEVAL_THRESHOLD = 0.15
 
 class AgentMemory:
     def __init__(self, session_id, db_path=None, host=None, port=None, auto_summarize=False):
@@ -151,7 +158,24 @@ class AgentMemory:
             m["content"] for m in chunk["messages"]
             if m["role"] == "user"
         ]
+        # When a chunk has been summarized, older user messages were compressed
+        # into a summary message. Include the chunk's preserved user keywords
+        # and summary text so summarized facts remain discoverable.
+        if chunk.get("summarized"):
+            keywords = " ".join(chunk.get("keywords", []))
+            summaries = " ".join(
+                m["content"].replace("[SUMMARY OF EARLIER CONVERSATION]:", "").strip()
+                for m in chunk["messages"]
+                if m.get("summarized")
+            )
+            return " ".join(part for part in [keywords, summaries] + user_msgs if part)
         return " ".join(user_msgs)
+
+    def _strip_stopwords(self, text):
+        return " ".join(
+            w for w in text.lower().split()
+            if w.strip(".,?!;:\"'()[]{}") not in STOPWORDS
+        )
 
     def add_message(self, role, content):
         with self._session_lock():
@@ -229,7 +253,13 @@ class AgentMemory:
 
         best_chunk = None
         best_score = 0
-        for chunk, score in zip(candidates, matcher.scores(content, candidate_texts)):
+        for chunk, score in zip(
+            candidates,
+            # Assignment compares a new message with a threshold.  Fit the
+            # vectorizer with the message as well as the candidate chunks so
+            # this retains the v1.1 score scale used to tune that threshold.
+            matcher.scores(content, candidate_texts),
+        ):
             if score > matcher.threshold and score > best_score:
                 best_score = score
                 best_chunk = chunk
@@ -286,15 +316,19 @@ class AgentMemory:
         for chunk in chunks:
             if chunk.get("type") == "general":
                 continue
-            chunk_text = self._get_user_only_text(chunk)
+            chunk_text = self._strip_stopwords(self._get_user_only_text(chunk))
             if not chunk_text.strip():
                 continue
             candidates.append(chunk)
             candidate_texts.append(chunk_text)
 
         scored = []
-        for chunk, score in zip(candidates, matcher.scores(current_message, candidate_texts)):
-            if score > 0.05:
+        query_text = self._strip_stopwords(current_message)
+        for chunk, score in zip(
+            candidates,
+            retrieval_matcher.cached_scores(self.session_id, query_text, candidate_texts),
+        ):
+            if score > RETRIEVAL_THRESHOLD:
                 scored.append((score, chunk))
 
         scored.sort(key=lambda x: x[0], reverse=True)
@@ -319,6 +353,7 @@ class AgentMemory:
                 self.r.delete(self.last_chunk_key)
             self._last_chunk_id = None
             self.db.delete_session(self.session_id)
+            retrieval_matcher.clear_cached_index(self.session_id)
         print("Memory cleared from Redis and SQLite.")
 
     def stats(self):

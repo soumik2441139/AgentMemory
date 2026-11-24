@@ -90,6 +90,34 @@ class TestChunkingLogic(unittest.TestCase):
         topic_chunks = [c for c in chunks if c.get("type") == "topic"]
         self.assertEqual(len(topic_chunks), 2, "Distinct topics must form distinct chunks")
 
+    def test_mixed_redis_and_transformer_message_does_not_merge_topics(self):
+        self.mem.add_message(
+            "user",
+            "Redis pubsub caching replication persistence cluster sentinel streams "
+            "transactions eviction and distributed locks are separate concerns.",
+        )
+        self.mem.add_message(
+            "user",
+            "Can Redis store transformer attention embeddings for my deep learning pipeline",
+        )
+        chunks = self.mem._get_all_chunks()
+        topic_chunks = [c for c in chunks if c.get("type") == "topic"]
+        self.assertEqual(len(topic_chunks), 2)
+
+    def test_mixed_redis_and_sourdough_message_does_not_merge_topics(self):
+        self.mem.add_message(
+            "user",
+            "Redis pubsub caching replication persistence cluster sentinel streams "
+            "transactions eviction and distributed locks are separate concerns.",
+        )
+        self.mem.add_message(
+            "user",
+            "Tell me about sourdough bread starter hydration and Redis",
+        )
+        chunks = self.mem._get_all_chunks()
+        topic_chunks = [c for c in chunks if c.get("type") == "topic"]
+        self.assertEqual(len(topic_chunks), 2)
+
     def test_assistant_reply_routes_to_current_topic(self):
         self.mem.add_message("user", "Tell me about Redis pubsub and caching")
         self.mem.add_message("assistant", "Redis pubsub is an asynchronous messaging model.")
@@ -135,6 +163,44 @@ class TestChunkingLogic(unittest.TestCase):
         context = self.mem.get_context("How do I configure Redis memory limits?")
         contents = " ".join([m["content"] for m in context])
         self.assertIn("Redis", contents)
+
+    def test_context_retrieval_excludes_unrelated_topics(self):
+        self.mem.add_message("user", "Tell me about Redis pubsub and caching")
+        self.mem.add_message("user", "How do transformer attention layers work in deep learning?")
+        context = self.mem.get_context("Explain quantum entanglement in particle physics")
+        self.assertEqual(context, [])
+
+    def test_summarized_chunk_remains_retrievable_by_early_fact(self):
+        self.mem.add_message("user", "Our staging Redis cluster runs on port 16379 with TLS.")
+        self.mem.add_message("assistant", "Noted the staging Redis port.")
+        # Simulate maybe_summarize() compressing early messages and leaving only
+        # recent follow-ups as raw user messages.
+        chunks = self.mem._get_all_chunks()
+        topic_chunk = next(c for c in chunks if c.get("type") == "topic")
+        topic_chunk["summarized"] = True
+        topic_chunk["messages"] = [
+            {
+                "role": "system",
+                "content": "[SUMMARY OF EARLIER CONVERSATION]: User's staging Redis cluster runs on port 16379 with TLS.",
+                "timestamp": time.time(),
+                "summarized": True,
+            },
+            {
+                "role": "user",
+                "content": "How should we monitor replication lag?",
+                "timestamp": time.time(),
+            },
+            {
+                "role": "assistant",
+                "content": "Track master_repl_offset and replica_repl_offset.",
+                "timestamp": time.time(),
+            },
+        ]
+        self.mem._save_chunk(topic_chunk)
+
+        context = self.mem.get_context("Which port does our staging Redis cluster use?")
+        combined = " ".join(m["content"] for m in context)
+        self.assertIn("16379", combined)
 
 
 if __name__ == "__main__":

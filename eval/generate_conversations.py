@@ -85,6 +85,50 @@ SCENARIOS = [
     }
 ]
 
+# These queries deliberately have no relevant topic in their conversation.
+# They measure retrieval precision separately from the fact-recall scenarios.
+NO_MATCH_CASES = [
+    {
+        "id": "quantum_physics",
+        "messages": [
+            {"role": "user", "content": "Our Redis cache uses TLS and runs on port 16379."},
+            {"role": "assistant", "content": "Noted the Redis deployment details."},
+            {"role": "user", "content": "Transformer attention helps language models focus on tokens."},
+            {"role": "assistant", "content": "That is a useful machine learning observation."},
+        ],
+        "query": "Explain quantum entanglement in particle physics.",
+    },
+    {
+        "id": "bread_baking",
+        "messages": [
+            {"role": "user", "content": "My primary code editor is Neovim with Lua and telescope."},
+            {"role": "assistant", "content": "Noted your development environment."},
+            {"role": "user", "content": "Cherry tomato seedlings need sunlight and well drained soil."},
+            {"role": "assistant", "content": "That should help the garden thrive."},
+        ],
+        "query": "How should I feed a sourdough starter before baking bread?",
+    },
+    {
+        "id": "kubernetes_scheduling",
+        "messages": [
+            {"role": "user", "content": "I enjoy classical piano concertos by Rachmaninoff."},
+            {"role": "assistant", "content": "Those concertos have memorable melodies."},
+            {"role": "user", "content": "A manual espresso machine can produce rich crema."},
+            {"role": "assistant", "content": "Grind size and brew ratio matter too."},
+        ],
+        "query": "How does Kubernetes schedule pods across cluster nodes?",
+    },
+]
+
+# No-match queries asked at the end of the long fact-recall conversations.
+# Unlike NO_MATCH_CASES, these run against 10-16 noisy topic chunks. Passing
+# means no topic-chunk message is returned (General Chat greetings are allowed).
+LONG_NO_MATCH_CASES = [
+    {"scenario_id": "dog_name", "query": "How do I replace a punctured bicycle tube?"},
+    {"scenario_id": "database_port", "query": "What stretches relieve sciatica discomfort?"},
+    {"scenario_id": "favorite_editor", "query": "How are employee stock options taxed?"},
+]
+
 
 def build_conversation(scenario, padding_multiplier=3):
     """
